@@ -1,101 +1,93 @@
 const { expect } = require("chai");
 const hre = require("hardhat");
 
-describe("SecureEcommerce - Intense Testing", function () {
-    let SecureEcommerce, ecommerce, token, owner, vendor, buyer, refundManager;
+const parseEther = hre.ethers.parseEther;
 
-    before(async function () {
-        const signers = await hre.ethers.getSigners();
-        [owner, vendor, buyer, refundManager] = signers;
+describe("SecureEcommerce", function () {
+    let ecommerce, token, owner, vendor, buyer, refundManager, orderManager;
 
-        // Deploy mock ERC20 token
-        const MockERC20 = await hre.ethers.getContractFactory("MockERC20");
-        token = await MockERC20.deploy("MockERC20", "MTK", hre.ethers.parseEther("10000"));
+    beforeEach(async () => {
+        [owner, vendor, buyer, refundManager, orderManager] = await hre.ethers.getSigners();
 
-        // Deploy SecureEcommerce contract
-        SecureEcommerce = await hre.ethers.getContractFactory("SecureEcommerce");
-        ecommerce = await SecureEcommerce.deploy(token.address);
+        const MockToken = await hre.ethers.getContractFactory("MockERC20");
+        token = await MockToken.deploy("TestToken", "TTK", parseEther("1000000"));
+        await token.waitForDeployment();
 
-        // Grant roles
-        await ecommerce.connect(owner).grantRole(await ecommerce.VENDOR_ROLE(), vendor.address);
-        await ecommerce.connect(owner).grantRole(await ecommerce.ORDER_MANAGER_ROLE(), owner.address);
-        await ecommerce.connect(owner).grantRole(await ecommerce.REFUND_MANAGER_ROLE(), refundManager.address);
+        const SecureEcommerce = await hre.ethers.getContractFactory("SecureEcommerce");
+        ecommerce = await SecureEcommerce.deploy(await token.getAddress());
+        await ecommerce.waitForDeployment();
+
+        await ecommerce.grantRole(await ecommerce.VENDOR_ROLE(), vendor.address);
+        await ecommerce.grantRole(await ecommerce.ORDER_MANAGER_ROLE(), orderManager.address);
+        await ecommerce.grantRole(await ecommerce.REFUND_MANAGER_ROLE(), refundManager.address);
     });
 
-    it("Should prevent unauthorized users from adding products", async function () {
-        await expect(
-            ecommerce.connect(buyer).addProduct(
-                "UnauthorizedProduct",
-                "NotAllowed",
-                hre.ethers.utils.parseEther("10"),
-                10
-            )
-        ).to.be.revertedWith("Not a vendor");
+    it("should allow vendor to add, update, and remove a product", async () => {
+        await ecommerce.connect(vendor).addProduct("Book", "Spiritual book", 100, 5);
+        let product = await ecommerce.products(1);
+        expect(product.name).to.equal("Book");
+
+        await ecommerce.connect(vendor).updateProduct(1, "Holy Book", 150, 10);
+        product = await ecommerce.products(1);
+        expect(product.price).to.equal(150);
+
+        await ecommerce.connect(vendor).removeProduct(1);
+        product = await ecommerce.products(1);
+        expect(product.exists).to.equal(false);
     });
 
-    it("Should allow vendor to add products", async function () {
-        await ecommerce.connect(vendor).addProduct(
-            "ValidProduct",
-            "Description",
-            hre.ethers.utils.parseEther("10"),
-            100
-        );
-
-        const product = await ecommerce.products(1);
-        expect(product.name).to.equal("ValidProduct");
-        expect(product.vendor).to.equal(vendor.address);
-    });
-
-    it("Should allow buyer to place an order", async function () {
-        await token.connect(buyer).approve(ecommerce.address, hre.ethers.utils.parseEther("20"));
+    it("should place order and hold funds in escrow", async () => {
+        await ecommerce.connect(vendor).addProduct("Puja Kit", "Essentials", 50, 10);
+        await token.transfer(buyer.address, parseEther("100"));
+        await token.connect(buyer).approve(await ecommerce.getAddress(), parseEther("100"));
 
         await ecommerce.connect(buyer).placeOrder([1], [2]);
-
         const order = await ecommerce.orders(1);
-        expect(order.buyer).to.equal(buyer.address);
-        expect(order.totalAmount).to.equal(hre.ethers.utils.parseEther("20"));
+        expect(order.totalAmount).to.equal(100);
     });
 
-    it("Should handle refunds properly", async function () {
-        await ecommerce.connect(refundManager).refundOrder(1);
+    it("should release funds to vendor after order is completed", async () => {
+        await ecommerce.connect(vendor).addProduct("Bell", "Temple bell", 40, 10);
+        await token.transfer(buyer.address, parseEther("80"));
+        await token.connect(buyer).approve(await ecommerce.getAddress(), parseEther("80"));
+        await ecommerce.connect(buyer).placeOrder([1], [2]);
 
-        const order = await ecommerce.orders(1);
-        expect(order.status).to.equal(5); // OrderStatus.Refunded
+        await ecommerce.connect(orderManager).updateOrderStatus(1, 3); // Completed
+        await ecommerce.connect(orderManager).releaseFunds(1);
 
-        const buyerBalance = await token.balanceOf(buyer.address);
-        expect(buyerBalance).to.be.gt(hre.ethers.utils.parseEther("9999"));
-    });
-
-    it("Should handle large orders correctly", async function () {
-        await ecommerce.connect(vendor).addProduct(
-            "BulkProduct",
-            "Bulk",
-            hre.ethers.utils.parseEther("1"),
-            5000
-        );
-
-        await token.connect(buyer).approve(ecommerce.address, hre.ethers.utils.parseEther("5000"));
-
-        await ecommerce.connect(buyer).placeOrder([2], [5000]);
-
-        const order = await ecommerce.orders(2);
-        expect(order.totalAmount).to.equal(hre.ethers.utils.parseEther("5000"));
-    });
-
-    it("Should prevent unauthorized role actions", async function () {
-        await expect(ecommerce.connect(buyer).updateOrderStatus(1, 3)).to.be.revertedWith(
-            "AccessControl: account is missing role"
-        );
-    });
-
-    it("Should release funds to vendor after order completion", async function () {
-        await ecommerce.connect(owner).updateOrderStatus(2, 4); // OrderStatus.Completed
-        await ecommerce.connect(owner).releaseFunds(2);
-
-        const balanceBefore = await token.balanceOf(vendor.address);
         await ecommerce.connect(vendor).withdrawPayout();
-        const balanceAfter = await token.balanceOf(vendor.address);
+        const balance = await token.balanceOf(vendor.address);
+        expect(balance).to.equal(80);
+    });
 
-        expect(balanceAfter.sub(balanceBefore)).to.equal(hre.ethers.utils.parseEther("5000"));
+    it("should refund buyer if dispute or placed", async () => {
+        await ecommerce.connect(vendor).addProduct("Ganga Jal", "Sacred", 30, 3);
+        await token.transfer(buyer.address, parseEther("30"));
+        await token.connect(buyer).approve(await ecommerce.getAddress(), parseEther("30"));
+        await ecommerce.connect(buyer).placeOrder([1], [1]);
+
+        await ecommerce.connect(refundManager).refundOrder(1);
+        const balance = await token.balanceOf(buyer.address);
+        expect(balance).to.equal(parseEther("30"));
+        ;
+    });
+
+    it("should reject refund if Can't refund", async () => {
+        await ecommerce.connect(vendor).addProduct("Lamp", "Clay", 20, 3);
+        await token.transfer(buyer.address, parseEther("20"));
+        await token.connect(buyer).approve(await ecommerce.getAddress(), parseEther("20"));
+        await ecommerce.connect(buyer).placeOrder([1], [1]);
+        await ecommerce.connect(orderManager).updateOrderStatus(1, 3);
+        await ecommerce.connect(orderManager).releaseFunds(1);
+
+        await expect(ecommerce.connect(refundManager).refundOrder(1)).to.be.revertedWith("Can't refund");
+    });
+
+    it("should prevent non-vendors from managing products", async () => {
+        await expect(ecommerce.connect(buyer).addProduct("Fake", "Hack", 10, 1)).to.be.revertedWith("Not a vendor");
+    });
+
+    it("should reject withdrawal with no balance", async () => {
+        await expect(ecommerce.connect(vendor).withdrawPayout()).to.be.revertedWith("No funds");
     });
 });
