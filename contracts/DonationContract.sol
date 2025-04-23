@@ -24,6 +24,10 @@ contract EDonations is ReentrancyGuard, AccessControl {
     bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
 
     IERC20 public token;
+    uint256 public donationCount;
+    uint256 public maxDonationPerTx = 1000 * 1e18;
+
+    uint256 public constant MAX_CAMPAIGN_NAME_LENGTH = 64;
 
     struct Donation {
         address donor;
@@ -34,14 +38,9 @@ contract EDonations is ReentrancyGuard, AccessControl {
     }
 
     mapping(uint256 => Donation) public donations;
-    uint256 public donationCount;
-
     mapping(address => uint256) public donorTotal;
-
     mapping(string => bool) public validCampaigns;
     mapping(string => address) public campaignReceivers;
-
-    uint256 public constant MAX_CAMPAIGN_NAME_LENGTH = 64;
 
     event DonationReceived(
         address indexed donor,
@@ -50,16 +49,28 @@ contract EDonations is ReentrancyGuard, AccessControl {
         string campaign,
         uint256 timestamp
     );
-
     event CampaignAdded(string campaign, address receiver);
     event CampaignRemoved(string campaign);
     event TokenWithdrawn(address tokenAddress, address to, uint256 amount);
+    event MaxDonationLimitUpdated(uint256 newLimit);
+    event NativePaymentRejected(address indexed sender, uint256 value);
 
     constructor(address _tokenAddress) {
         require(_tokenAddress != address(0), "Invalid token address");
+        token = IERC20(_tokenAddress);
         _grantRole(OWNER_ROLE, msg.sender);
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        token = IERC20(_tokenAddress);
+    }
+
+    // 🛡 Block accidental ETH transfers
+    receive() external payable {
+        emit NativePaymentRejected(msg.sender, msg.value);
+        revert("Native payments not supported");
+    }
+
+    fallback() external payable {
+        emit NativePaymentRejected(msg.sender, msg.value);
+        revert("Fallback calls not allowed");
     }
 
     modifier onlyCampaign(string memory campaign) {
@@ -81,6 +92,7 @@ contract EDonations is ReentrancyGuard, AccessControl {
 
         validCampaigns[name] = true;
         campaignReceivers[name] = receiver;
+
         emit CampaignAdded(name, receiver);
     }
 
@@ -91,6 +103,14 @@ contract EDonations is ReentrancyGuard, AccessControl {
         emit CampaignRemoved(name);
     }
 
+    function setMaxDonationLimit(
+        uint256 newLimit
+    ) external onlyRole(OWNER_ROLE) {
+        require(newLimit > 0, "Invalid limit");
+        maxDonationPerTx = newLimit;
+        emit MaxDonationLimitUpdated(newLimit);
+    }
+
     function isCampaignValid(string memory name) external view returns (bool) {
         return validCampaigns[name];
     }
@@ -99,7 +119,8 @@ contract EDonations is ReentrancyGuard, AccessControl {
         string calldata campaign,
         uint256 amount
     ) external nonReentrant onlyCampaign(campaign) {
-        require(amount > 0, "Donation amount must be greater than zero");
+        require(amount > 0, "Amount must be greater than zero");
+        require(amount <= maxDonationPerTx, "Donation exceeds max limit");
 
         address receiver = campaignReceivers[campaign];
         require(receiver != address(0), "Campaign receiver missing");
@@ -114,7 +135,6 @@ contract EDonations is ReentrancyGuard, AccessControl {
             campaign,
             block.timestamp
         );
-
         donorTotal[msg.sender] += amount;
 
         emit DonationReceived(
@@ -124,7 +144,6 @@ contract EDonations is ReentrancyGuard, AccessControl {
             campaign,
             block.timestamp
         );
-
         donationCount++;
     }
 
@@ -133,15 +152,9 @@ contract EDonations is ReentrancyGuard, AccessControl {
     )
         external
         view
-        returns (
-            address donor,
-            address receiver,
-            uint256 amount,
-            string memory campaign,
-            uint256 timestamp
-        )
+        returns (address, address, uint256, string memory, uint256)
     {
-        require(index < donationCount, "Donation index out of bounds");
+        require(index < donationCount, "Invalid index");
         Donation memory d = donations[index];
         return (d.donor, d.receiver, d.amount, d.campaign, d.timestamp);
     }

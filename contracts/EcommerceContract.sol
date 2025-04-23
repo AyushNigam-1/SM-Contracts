@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+// import "@openzeppelin/contracts/security/Pausable.sol";
 import "./lib/Counters.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
@@ -26,6 +27,7 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
         uint256 productId;
         string name;
         string description;
+        string image;
         uint256 price;
         address vendor;
         uint256 stock;
@@ -89,6 +91,8 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
     event OrderRefunded(uint256 orderId, address buyer, uint256 amount);
     event Withdrawal(address vendor, uint256 amount);
     event FundsReleased(uint256 orderId);
+    event Paused(address account);
+    event Unpaused(address account);
 
     constructor(address _token) {
         require(_token != address(0), "Invalid token");
@@ -101,12 +105,21 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
         _;
     }
 
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
     function addProduct(
         string memory _name,
         string memory _description,
+        string memory _image,
         uint256 _price,
         uint256 _stock
-    ) external onlyVendor {
+    ) external onlyVendor whenNotPaused {
         require(_price > 0 && _stock > 0, "Invalid price or stock");
         require(bytes(_name).length > 0, "Name required");
 
@@ -117,6 +130,7 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
             productId: productId,
             name: _name,
             description: _description,
+            image: _image,
             price: _price,
             vendor: msg.sender,
             stock: _stock,
@@ -132,7 +146,7 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
         string memory _name,
         uint256 _price,
         uint256 _stock
-    ) external onlyVendor {
+    ) external onlyVendor whenNotPaused {
         Product storage product = products[_productId];
         require(product.exists && product.vendor == msg.sender, "Unauthorized");
         product.name = _name;
@@ -141,7 +155,9 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
         emit ProductUpdated(_productId, _name, _price, _stock);
     }
 
-    function removeProduct(uint256 _productId) external onlyVendor {
+    function removeProduct(
+        uint256 _productId
+    ) external onlyVendor whenNotPaused {
         Product storage product = products[_productId];
         require(product.exists && product.vendor == msg.sender, "Unauthorized");
         product.exists = false;
@@ -149,10 +165,19 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
         emit ProductRemoved(_productId);
     }
 
+    function getAllProducts() external view returns (Product[] memory) {
+        uint256 count = _productIds.current();
+        Product[] memory all = new Product[](count);
+        for (uint256 i = 1; i <= count; i++) {
+            all[i - 1] = products[i];
+        }
+        return all;
+    }
+
     function placeOrder(
         uint256[] calldata _productIds,
         uint256[] calldata _quantities
-    ) external nonReentrant returns (uint256 orderId) {
+    ) external nonReentrant whenNotPaused returns (uint256 orderId) {
         require(
             _productIds.length == _quantities.length && _productIds.length > 0,
             "Invalid input"
@@ -207,10 +232,6 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
 
         order.fundsReleased = true;
 
-        address[] memory vendors = new address[](orderItems[_orderId].length);
-        uint256[] memory amounts = new uint256[](orderItems[_orderId].length);
-        uint256 count = 0;
-
         for (uint256 i = 0; i < orderItems[_orderId].length; i++) {
             OrderItem memory item = orderItems[_orderId][i];
             Product memory product = products[item.productId];
@@ -219,9 +240,6 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
             if (vendorEscrow[_orderId][product.vendor] > 0) {
                 pendingWithdrawals[product.vendor] += amount;
                 vendorEscrow[_orderId][product.vendor] = 0;
-                vendors[count] = product.vendor;
-                amounts[count] = amount;
-                count++;
             }
         }
 
@@ -274,6 +292,4 @@ contract SecureEcommerce is ReentrancyGuard, AccessControl {
         );
         emit OrderRefunded(_orderId, order.buyer, order.totalAmount);
     }
-
-    // Additional view functions remain unchanged
 }
