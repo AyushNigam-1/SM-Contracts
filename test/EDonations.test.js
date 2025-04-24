@@ -8,17 +8,14 @@ describe("EDonations Contract", function () {
     beforeEach(async () => {
         [owner, user, treasury, otherReceiver] = await hre.ethers.getSigners();
 
-        // Deploy mock token
         const MockToken = await hre.ethers.getContractFactory("MockERC20");
         token = await MockToken.deploy("RW-TMCG", "RW", parseEther("1000000"));
         await token.waitForDeployment();
 
-        // Deploy donation contract
         const EDonations = await hre.ethers.getContractFactory("EDonations");
         donationContract = await EDonations.deploy(await token.getAddress());
         await donationContract.waitForDeployment();
 
-        // Grant owner role
         const OWNER_ROLE = await donationContract.OWNER_ROLE();
         await donationContract.grantRole(OWNER_ROLE, owner.address);
     });
@@ -63,22 +60,26 @@ describe("EDonations Contract", function () {
 
     it("should store and return donation data", async () => {
         await donationContract.addCampaign("temple_mumbai", treasury.address);
+
         const amount = parseEther("10");
         await token.transfer(user.address, amount);
         await token.connect(user).approve(await donationContract.getAddress(), amount);
         await donationContract.connect(user).donate("temple_mumbai", amount);
 
-        const donation = await donationContract.getDonation(0);
-        expect(donation.donor).to.equal(user.address);
-        expect(donation.receiver).to.equal(treasury.address);
-        expect(donation.amount).to.equal(amount);
-        expect(donation.campaign).to.equal("temple_mumbai");
+        const [donor, receiver, donatedAmount, campaign, timestamp] = await donationContract.getDonation(0);
+
+        expect(donor).to.equal(user.address);
+        expect(receiver).to.equal(treasury.address);
+        expect(donatedAmount).to.equal(amount);
+        expect(campaign).to.equal("temple_mumbai");
+        expect(timestamp).to.be.a("bigint"); // Optional check
     });
 
     it("should paginate donations", async () => {
         await donationContract.addCampaign("general", treasury.address);
         const amount = parseEther("1");
-        await token.transfer(user.address, amount * 3n); // use BigInt
+
+        await token.transfer(user.address, amount * 3n);
         await token.connect(user).approve(await donationContract.getAddress(), amount * 3n);
 
         for (let i = 0; i < 3; i++) {
@@ -91,12 +92,12 @@ describe("EDonations Contract", function () {
 
     it("should prevent non-owners from adding campaigns", async () => {
         const OWNER_ROLE = await donationContract.OWNER_ROLE();
+
         await expect(
             donationContract.connect(user).addCampaign("unauthorized", treasury.address)
         ).to.be.revertedWithCustomError(donationContract, "AccessControlUnauthorizedAccount")
             .withArgs(user.address, OWNER_ROLE);
     });
-
 
     it("should allow admin to withdraw stuck tokens", async () => {
         const testAmount = parseEther("50");
