@@ -2,27 +2,28 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
-contract RewardContract is AccessControl, ReentrancyGuard {
+interface IKnowledgeToken {
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    function balanceOf(address account) external view returns (uint256);
+}
+
+contract RewardContract is AccessControl, ReentrancyGuard, Pausable {
     bytes32 public constant REWARD_MANAGER_ROLE =
         keccak256("REWARD_MANAGER_ROLE");
 
-    IERC20 public immutable rewardToken;
-    uint256 public rewardRate; // Example: 5 means 5% reward
-
-    mapping(address => uint256) public rewardsGiven;
+    IKnowledgeToken public immutable rewardToken;
 
     event RewardIssued(address indexed user, uint256 amount);
-    event RewardRateUpdated(uint256 newRate);
+    event TokensWithdrawn(address indexed to, uint256 amount);
 
-    constructor(address _tokenAddress, uint256 _rewardRate) {
-        require(_tokenAddress != address(0), "Invalid token");
-        require(_rewardRate > 0, "Invalid reward rate");
+    constructor(address tokenAddress) {
+        require(tokenAddress != address(0), "Invalid token address");
 
-        rewardToken = IERC20(_tokenAddress);
-        rewardRate = _rewardRate;
+        rewardToken = IKnowledgeToken(tokenAddress);
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(REWARD_MANAGER_ROLE, msg.sender);
@@ -30,29 +31,47 @@ contract RewardContract is AccessControl, ReentrancyGuard {
 
     function issueReward(
         address user,
-        uint256 baseAmount
-    ) external onlyRole(REWARD_MANAGER_ROLE) nonReentrant {
-        require(user != address(0), "Invalid user");
-        require(baseAmount > 0, "Base amount must be > 0");
-
-        uint256 reward = (baseAmount * rewardRate) / 100;
+        uint256 amount
+    ) external onlyRole(REWARD_MANAGER_ROLE) nonReentrant whenNotPaused {
+        require(user != address(0), "Invalid user address");
+        require(amount > 0, "Reward must be greater than zero");
         require(
-            rewardToken.balanceOf(address(this)) >= reward,
+            rewardToken.balanceOf(address(this)) >= amount,
             "Insufficient contract balance"
         );
 
-        rewardsGiven[user] += reward;
-        bool success = rewardToken.transfer(user, reward);
+        bool success = rewardToken.transfer(user, amount);
         require(success, "Reward transfer failed");
 
-        emit RewardIssued(user, reward);
+        emit RewardIssued(user, amount);
     }
 
-    function setRewardRate(
-        uint256 newRate
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newRate > 0, "Invalid rate");
-        rewardRate = newRate;
-        emit RewardRateUpdated(newRate);
+    function withdrawTokens(
+        address to,
+        uint256 amount
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        require(to != address(0), "Invalid recipient address");
+        require(amount > 0, "Withdraw amount must be greater than zero");
+        require(
+            rewardToken.balanceOf(address(this)) >= amount,
+            "Insufficient balance"
+        );
+
+        bool success = rewardToken.transfer(to, amount);
+        require(success, "Withdraw failed");
+
+        emit TokensWithdrawn(to, amount);
+    }
+
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+    receive() external payable {
+        revert("Native payments not supported");
     }
 }

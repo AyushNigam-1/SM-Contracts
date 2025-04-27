@@ -17,27 +17,35 @@ interface IKnowledgeToken {
     function balanceOf(address account) external view returns (uint256);
 }
 
-contract CharityDonationProof is AccessControl, ReentrancyGuard, Pausable {
+contract EDonation is AccessControl, ReentrancyGuard, Pausable {
     bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
 
     IKnowledgeToken public immutable token;
 
-    struct Donation {
-        address donor;
+    struct Campaign {
+        address creator;
         address receiver;
+        bool active;
+    }
+
+    struct Donation {
+        uint256 donationId;
+        address donor;
         uint256 amount;
         string campaignId;
         uint256 timestamp;
         string proofHash;
     }
 
+    mapping(string => Campaign) public campaigns;
+    mapping(uint256 => Donation) public donations;
+    mapping(string => uint256[]) public campaignDonationIds;
+    mapping(string => uint256) public campaignTotalDonations;
+
     uint256 public donationCount;
 
-    mapping(string => address) public campaignReceivers; // campaignId => receiver address
-    mapping(uint256 => Donation) public donations;
-
-    event CampaignAdded(string campaignId, address receiver);
-    event CampaignRemoved(string campaignId);
+    event CampaignCreated(string campaignId, address creator, address receiver);
+    event CampaignApproved(string campaignId);
     event DonationReceived(
         address indexed donor,
         uint256 amount,
@@ -46,81 +54,99 @@ contract CharityDonationProof is AccessControl, ReentrancyGuard, Pausable {
     );
     event ProofSubmitted(uint256 indexed donationId, string proofHash);
 
-    constructor(address _tokenAddress) {
-        require(_tokenAddress != address(0), "Invalid token address");
-
-        token = IKnowledgeToken(_tokenAddress);
+    constructor(address tokenAddress) {
+        require(tokenAddress != address(0), "Invalid token address");
+        token = IKnowledgeToken(tokenAddress);
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(OWNER_ROLE, msg.sender);
     }
 
-    modifier validCampaign(string memory campaignId) {
+    modifier campaignExists(string memory campaignId) {
         require(
-            campaignReceivers[campaignId] != address(0),
+            campaigns[campaignId].receiver != address(0),
             "Campaign does not exist"
         );
         _;
     }
 
-    function addCampaign(
+    modifier campaignIsActive(string memory campaignId) {
+        require(campaigns[campaignId].active, "Campaign not active");
+        _;
+    }
+
+    function createCampaign(
         string calldata campaignId,
         address receiver
-    ) external onlyRole(OWNER_ROLE) {
+    ) external whenNotPaused {
         require(bytes(campaignId).length > 0, "Campaign ID required");
         require(receiver != address(0), "Invalid receiver address");
         require(
-            campaignReceivers[campaignId] == address(0),
+            campaigns[campaignId].receiver == address(0),
             "Campaign already exists"
         );
 
-        campaignReceivers[campaignId] = receiver;
+        campaigns[campaignId] = Campaign({
+            creator: msg.sender,
+            receiver: receiver,
+            active: false
+        });
 
-        emit CampaignAdded(campaignId, receiver);
+        emit CampaignCreated(campaignId, msg.sender, receiver);
     }
 
-    function removeCampaign(
+    function approveCampaign(
         string calldata campaignId
-    ) external onlyRole(OWNER_ROLE) {
+    ) external onlyRole(OWNER_ROLE) whenNotPaused {
         require(
-            campaignReceivers[campaignId] != address(0),
+            campaigns[campaignId].receiver != address(0),
             "Campaign does not exist"
         );
+        require(!campaigns[campaignId].active, "Already active");
 
-        delete campaignReceivers[campaignId];
-
-        emit CampaignRemoved(campaignId);
+        campaigns[campaignId].active = true;
+        emit CampaignApproved(campaignId);
     }
 
     function donate(
         string calldata campaignId,
         uint256 amount
-    ) external nonReentrant whenNotPaused validCampaign(campaignId) {
+    )
+        external
+        nonReentrant
+        whenNotPaused
+        campaignExists(campaignId)
+        campaignIsActive(campaignId)
+    {
         require(amount > 0, "Amount must be greater than zero");
 
-        address receiver = campaignReceivers[campaignId];
-
-        bool success = token.transferFrom(msg.sender, receiver, amount);
+        bool success = token.transferFrom(
+            msg.sender,
+            campaigns[campaignId].receiver,
+            amount
+        );
         require(success, "Token transfer failed");
 
         donations[donationCount] = Donation({
+            donationId: donationCount,
             donor: msg.sender,
-            receiver: receiver,
             amount: amount,
             campaignId: campaignId,
             timestamp: block.timestamp,
             proofHash: ""
         });
 
-        emit DonationReceived(msg.sender, amount, campaignId, donationCount);
+        campaignTotalDonations[campaignId] += amount;
+        campaignDonationIds[campaignId].push(donationCount);
 
+        emit DonationReceived(msg.sender, amount, campaignId, donationCount);
         donationCount++;
     }
 
     function submitProof(
         uint256 donationId,
         string calldata proofHash
-    ) external onlyRole(OWNER_ROLE) whenNotPaused {
+    ) external whenNotPaused {
         require(donationId < donationCount, "Invalid donation ID");
         require(bytes(proofHash).length > 0, "Proof hash required");
         require(
@@ -128,8 +154,14 @@ contract CharityDonationProof is AccessControl, ReentrancyGuard, Pausable {
             "Proof already submitted"
         );
 
-        donations[donationId].proofHash = proofHash;
+        // Only the campaign receiver can submit proof
+        string memory campaignId = donations[donationId].campaignId;
+        require(
+            campaigns[campaignId].receiver == msg.sender,
+            "Not authorized to submit proof"
+        );
 
+        donations[donationId].proofHash = proofHash;
         emit ProofSubmitted(donationId, proofHash);
     }
 
@@ -138,6 +170,18 @@ contract CharityDonationProof is AccessControl, ReentrancyGuard, Pausable {
     ) external view returns (Donation memory) {
         require(donationId < donationCount, "Invalid donation ID");
         return donations[donationId];
+    }
+
+    function getDonationsForCampaign(
+        string calldata campaignId
+    ) external view returns (uint256[] memory) {
+        return campaignDonationIds[campaignId];
+    }
+
+    function getTotalDonationsForCampaign(
+        string calldata campaignId
+    ) external view returns (uint256) {
+        return campaignTotalDonations[campaignId];
     }
 
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
