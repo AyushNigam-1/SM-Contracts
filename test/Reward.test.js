@@ -1,64 +1,69 @@
 const { expect } = require("chai");
-const hre = require("hardhat");
+const { ethers } = require("hardhat");
 
 describe("RewardContract", function () {
-    let rewardToken, rewardContract;
-    let admin, manager, user;
+    let RewardContract, MockToken;
+    let rewardContract, token;
+    let admin, manager, user, nonManager;
+
+    const parseEther = ethers.parseEther;
 
     beforeEach(async () => {
-        [admin, manager, user] = await hre.ethers.getSigners();
+        [admin, manager, user, nonManager] = await ethers.getSigners();
 
-        const MockToken = await hre.ethers.getContractFactory("MockERC20");
-        rewardToken = await MockToken.deploy("RewardToken", "RWT", hre.ethers.parseEther("1000000"));
-        await rewardToken.waitForDeployment();
+        MockToken = await ethers.getContractFactory("MockERC20");
+        token = await MockToken.deploy("KnowledgeToken", "KNW", parseEther("1000000"));
+        await token.waitForDeployment();
 
-        const RewardContract = await hre.ethers.getContractFactory("RewardContract");
-        rewardContract = await RewardContract.deploy(await rewardToken.getAddress(), 5); // 5% rate
+        RewardContract = await ethers.getContractFactory("RewardContract");
+        rewardContract = await RewardContract.deploy(token.target);
         await rewardContract.waitForDeployment();
 
-        // Give contract some reward tokens
-        await rewardToken.transfer(await rewardContract.getAddress(), hre.ethers.parseEther("100000"));
-
-        // Grant REWARD_MANAGER_ROLE to manager
-        const ROLE = await rewardContract.REWARD_MANAGER_ROLE();
-        await rewardContract.connect(admin).grantRole(ROLE, manager.address);
+        await rewardContract.grantRole(await rewardContract.REWARD_MANAGER_ROLE(), manager.address);
+        await token.transfer(rewardContract.target, parseEther("1000"));
     });
 
-    it("should issue rewards based on rate", async () => {
-        const baseAmount = hre.ethers.parseEther("1000");
-        await rewardContract.connect(manager).issueReward(user.address, baseAmount);
-
-        const userBalance = await rewardToken.balanceOf(user.address);
-        expect(userBalance).to.equal(hre.ethers.parseEther("50")); // 5% of 1000
-
-        const totalGiven = await rewardContract.rewardsGiven(user.address);
-        expect(totalGiven).to.equal(hre.ethers.parseEther("50"));
+    it("should allow manager to issue reward", async () => {
+        await rewardContract.connect(manager).issueReward(user.address, parseEther("50"));
+        const balance = await token.balanceOf(user.address);
+        expect(balance).to.equal(parseEther("50"));
     });
 
-    it("should not issue reward from non-manager", async () => {
-        const baseAmount = hre.ethers.parseEther("1000");
+    it("should revert if non-manager tries to issue reward", async () => {
         await expect(
-            rewardContract.connect(user).issueReward(user.address, baseAmount)
-        ).to.be.revertedWithCustomError(rewardContract, "AccessControlUnauthorizedAccount");
-
+            rewardContract.connect(nonManager).issueReward(user.address, parseEther("10"))
+        ).to.be.revertedWithCustomError(
+            rewardContract,
+            "AccessControlUnauthorizedAccount"
+        ).withArgs(nonManager.address, await rewardContract.REWARD_MANAGER_ROLE());
     });
 
-    it("should update reward rate by admin", async () => {
-        await rewardContract.connect(admin).setRewardRate(10);
-        expect(await rewardContract.rewardRate()).to.equal(10);
+    it("should withdraw tokens by admin", async () => {
+        const amount = parseEther("100");
+
+        const contractBalanceBefore = await token.balanceOf(rewardContract.target);
+        const adminBalanceBefore = await token.balanceOf(admin.address);
+
+        await rewardContract.withdrawTokens(admin.address, amount);
+
+        const contractBalanceAfter = await token.balanceOf(rewardContract.target);
+        const adminBalanceAfter = await token.balanceOf(admin.address);
+
+        expect(contractBalanceAfter).to.equal(contractBalanceBefore - amount);
+        expect(adminBalanceAfter).to.equal(adminBalanceBefore + amount);
     });
 
-    it("should prevent reward rate update by non-admin", async () => {
+    it("should revert reward if contract paused", async () => {
+        await rewardContract.pause();
+
         await expect(
-            rewardContract.connect(user).setRewardRate(15)
-        ).to.be.revertedWithCustomError(rewardContract, "AccessControlUnauthorizedAccount");
+            rewardContract.connect(manager).issueReward(user.address, parseEther("10"))
+        ).to.be.revertedWithCustomError(rewardContract, "EnforcedPause");
 
-    });
+        await rewardContract.unpause();
 
-    it("should revert if contract balance is insufficient", async () => {
-        const baseAmount = hre.ethers.parseEther("5000000"); // way more than balance
-        await expect(
-            rewardContract.connect(manager).issueReward(user.address, baseAmount)
-        ).to.be.revertedWith("Insufficient contract balance");
+        await rewardContract.connect(manager).issueReward(user.address, parseEther("10"));
+        const balance = await token.balanceOf(user.address);
+        expect(balance).to.equal(parseEther("10"));
     });
 });

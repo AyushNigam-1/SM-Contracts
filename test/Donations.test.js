@@ -1,81 +1,105 @@
 const { expect } = require("chai");
-const hre = require("hardhat");
+const { ethers } = require("hardhat");
 
-describe("EDonation Updated Contract", function () {
-    let donationContract, token, owner, user, receiver, otherUser;
-    const parseEther = hre.ethers.parseEther;
+describe("EDonation Contract", function () {
+    let EDonation, MockToken;
+    let donationContract, token;
+    let owner, user, receiver;
+
+    const parseEther = ethers.parseEther;
 
     beforeEach(async () => {
-        [owner, user, receiver, otherUser] = await hre.ethers.getSigners();
+        [owner, user, receiver] = await ethers.getSigners();
 
-        const Token = await hre.ethers.getContractFactory("MockERC20");
-        token = await Token.deploy("KnowledgeToken", "KNW", parseEther("1000000"));
+        MockToken = await ethers.getContractFactory("MockERC20");
+        token = await MockToken.deploy("KnowledgeToken", "KNW", parseEther("1000000"));
         await token.waitForDeployment();
 
-        const EDonation = await hre.ethers.getContractFactory("EDonation");
-        donationContract = await EDonation.deploy(await token.getAddress());
+        EDonation = await ethers.getContractFactory("EDonation");
+        donationContract = await EDonation.deploy(token.target);
         await donationContract.waitForDeployment();
 
-        await donationContract.grantRole(await donationContract.OWNER_ROLE(), owner.address);
+        const OWNER_ROLE = await donationContract.OWNER_ROLE();
+        await donationContract.grantRole(OWNER_ROLE, owner.address);
     });
 
-    it("should allow anyone to create a pending campaign", async () => {
-        await expect(donationContract.connect(user).createCampaign("temple_food", receiver.address))
-            .to.emit(donationContract, "CampaignCreated")
-            .withArgs("temple_food", user.address, receiver.address);
+    it("should create and approve campaign", async () => {
+        await donationContract.createCampaign("food_drive", receiver.address);
+        await donationContract.approveCampaign("food_drive");
 
-        const campaign = await donationContract.campaigns("temple_food");
-        expect(campaign.receiver).to.equal(receiver.address);
-        expect(campaign.active).to.be.false;
+        const campaign = await donationContract.campaigns("food_drive");
+        expect(campaign.active).to.equal(true);
     });
 
-    it("should allow admin to approve a campaign", async () => {
-        await donationContract.connect(user).createCampaign("education", receiver.address);
-        await expect(donationContract.connect(owner).approveCampaign("education"))
-            .to.emit(donationContract, "CampaignApproved");
-
-        const campaign = await donationContract.campaigns("education");
-        expect(campaign.active).to.be.true;
-    });
-
-    it("should allow donation only to active campaign", async () => {
-        await donationContract.connect(user).createCampaign("water_supply", receiver.address);
-        await donationContract.connect(owner).approveCampaign("water_supply");
+    it("should donate successfully", async () => {
+        await donationContract.createCampaign("temple", receiver.address);
+        await donationContract.approveCampaign("temple");
 
         await token.transfer(user.address, parseEther("100"));
-        await token.connect(user).approve(await donationContract.getAddress(), parseEther("100"));
+        await token.connect(user).approve(donationContract.target, parseEther("100"));
 
-        await expect(donationContract.connect(user).donate("water_supply", parseEther("50")))
-            .to.emit(donationContract, "DonationReceived");
+        await donationContract.connect(user).donate("temple", parseEther("50"));
 
-        const donation = await donationContract.donations(0);
+        const donation = await donationContract.getDonation(0);
+        expect(donation.donor).to.equal(user.address);
         expect(donation.amount).to.equal(parseEther("50"));
-        expect(donation.campaignId).to.equal("water_supply");
+        expect(donation.campaignId).to.equal("temple");
     });
 
-    it("should reject donation to pending campaign", async () => {
-        await donationContract.connect(user).createCampaign("health", receiver.address);
+    it("should reject donation if paused", async () => {
+        await donationContract.createCampaign("edu", receiver.address);
+        await donationContract.approveCampaign("edu");
 
-        await token.transfer(user.address, parseEther("50"));
-        await token.connect(user).approve(await donationContract.getAddress(), parseEther("50"));
+        await token.transfer(user.address, parseEther("10"));
+        await token.connect(user).approve(donationContract.target, parseEther("10"));
+
+        await donationContract.pause();
 
         await expect(
-            donationContract.connect(user).donate("health", parseEther("50"))
-        ).to.be.revertedWith("Campaign not active");
+            donationContract.connect(user).donate("edu", parseEther("5"))
+        ).to.be.revertedWithCustomError(donationContract, "EnforcedPause");
     });
 
-    it("should allow owner to submit proof for donation", async () => {
-        await donationContract.connect(user).createCampaign("animal_care", receiver.address);
-        await donationContract.connect(owner).approveCampaign("animal_care");
+    it("should allow receiver to submit proof", async () => {
+        await donationContract.createCampaign("books", receiver.address);
+        await donationContract.approveCampaign("books");
+
+        await token.transfer(user.address, parseEther("5"));
+        await token.connect(user).approve(donationContract.target, parseEther("5"));
+
+        await donationContract.connect(user).donate("books", parseEther("5"));
+
+        await donationContract.connect(receiver).submitProof(0, "ipfs://proof-hash");
+
+        const updated = await donationContract.getDonation(0);
+        expect(updated.proofHash).to.equal("ipfs://proof-hash");
+    });
+
+    it("should get all donation IDs for a campaign", async () => {
+        await donationContract.createCampaign("ganga", receiver.address);
+        await donationContract.approveCampaign("ganga");
 
         await token.transfer(user.address, parseEther("20"));
-        await token.connect(user).approve(await donationContract.getAddress(), parseEther("20"));
-        await donationContract.connect(user).donate("animal_care", parseEther("20"));
+        await token.connect(user).approve(donationContract.target, parseEther("20"));
 
-        await expect(donationContract.connect(owner).submitProof(0, "QmSomeIPFSHash"))
-            .to.emit(donationContract, "ProofSubmitted");
+        await donationContract.connect(user).donate("ganga", parseEther("10"));
+        await donationContract.connect(user).donate("ganga", parseEther("5"));
 
-        const donation = await donationContract.donations(0);
-        expect(donation.proofHash).to.equal("QmSomeIPFSHash");
+        const ids = await donationContract.getDonationsForCampaign("ganga");
+        expect(ids.length).to.equal(2);
+    });
+
+    it("should get total donation amount for a campaign", async () => {
+        await donationContract.createCampaign("relief", receiver.address);
+        await donationContract.approveCampaign("relief");
+
+        await token.transfer(user.address, parseEther("30"));
+        await token.connect(user).approve(donationContract.target, parseEther("30"));
+
+        await donationContract.connect(user).donate("relief", parseEther("10"));
+        await donationContract.connect(user).donate("relief", parseEther("5"));
+
+        const total = await donationContract.getTotalDonationsForCampaign("relief");
+        expect(total).to.equal(parseEther("15"));
     });
 });
