@@ -11,7 +11,7 @@ describe("EDonation Contract", function () {
     beforeEach(async () => {
         [owner, user, receiver] = await ethers.getSigners();
 
-        MockToken = await ethers.getContractFactory("MockERC20");
+        MockToken = await ethers.getContractFactory("MockXRC20");
         token = await MockToken.deploy("KnowledgeToken", "KNW", parseEther("1000000"));
         await token.waitForDeployment();
 

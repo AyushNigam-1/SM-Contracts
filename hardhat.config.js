@@ -1,6 +1,14 @@
 require("@nomicfoundation/hardhat-toolbox");
+require("@nomicfoundation/hardhat-ignition");
+require("dotenv").config();
 
-/** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
-  solidity: "0.8.28",
+  solidity: "0.8.20",
+  networks: {
+    xdc: {
+      url: "https://rpc.apothem.network", // Apothem Testnet
+      chainId: 51,
+      accounts: ["YOUR_PRIVATE_KEY"],
+    },
+  },
 };
